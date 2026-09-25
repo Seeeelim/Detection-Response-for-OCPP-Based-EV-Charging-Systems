@@ -1,0 +1,1 @@
+alert tcp 192.168.100.10 any -> 192.168.100.20 8180 (msg:"LAB OCPP EVSE to CSMS traffic"; flow:established,to_server; sid:1000001; rev:1;)

@@ -1,0 +1,213 @@
+/*
+ * SteVe - SteckdosenVerwaltung - https://github.com/steve-community/steve
+ * Copyright (C) 2013-2026 SteVe Community Team
+ * All Rights Reserved.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+package de.rwth.idsg.steve.ocpp.ws;
+
+import de.rwth.idsg.steve.ocpp.OcppSecurityProfile;
+import de.rwth.idsg.steve.repository.dto.ChargePointRegistration;
+import de.rwth.idsg.steve.service.CertificateValidator;
+import de.rwth.idsg.steve.service.ChargePointService;
+import de.rwth.idsg.steve.web.validation.ChargeBoxIdValidator;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.server.ServerHttpRequest;
+import org.springframework.http.server.ServerHttpResponse;
+import org.springframework.http.server.ServletServerHttpRequest;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.web.authentication.www.BasicAuthenticationConverter;
+import org.springframework.util.CollectionUtils;
+import org.springframework.web.socket.SubProtocolCapable;
+import org.springframework.web.socket.WebSocketHandler;
+import org.springframework.web.socket.WebSocketHttpHeaders;
+import org.springframework.web.socket.server.HandshakeFailureException;
+import org.springframework.web.socket.server.HandshakeHandler;
+import org.springframework.web.socket.server.support.DefaultHandshakeHandler;
+
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+
+import static de.rwth.idsg.steve.utils.StringUtils.getLastBitFromUrl;
+
+/**
+ * @author Sevket Goekay <sevketgokay@gmail.com>
+ * @since 05.03.2022
+ */
+@Slf4j
+@RequiredArgsConstructor
+public class OcppWebSocketHandshakeHandler implements HandshakeHandler {
+
+    private final ChargeBoxIdValidator chargeBoxIdValidator;
+    private final DefaultHandshakeHandler delegate;
+    private final SubProtocolCapable subProtocolCapable;
+    private final ChargePointService chargePointService;
+    private final CertificateValidator certificateValidator;
+    private final String protocolHeaderFromProxy;
+
+    private final BasicAuthenticationConverter converter = new BasicAuthenticationConverter();
+
+    @Override
+    public boolean doHandshake(ServerHttpRequest request, ServerHttpResponse response,
+                               WebSocketHandler wsHandler, Map<String, Object> attributes) throws HandshakeFailureException {
+
+        // -------------------------------------------------------------------------
+        // 1. Check the chargeBoxId
+        // -------------------------------------------------------------------------
+
+        String chargeBoxId = getLastBitFromUrl(request.getURI().getPath());
+        log.debug("Extracted chargeBoxId='{}'", chargeBoxId);
+
+        boolean isValid = chargeBoxIdValidator.isValid(chargeBoxId);
+        if (!isValid) {
+            log.error("ChargeBoxId '{}' violates the configured pattern.", chargeBoxId);
+            response.setStatusCode(HttpStatus.BAD_REQUEST);
+            return false;
+        }
+        log.debug("ChargeBoxId '{}' has a valid pattern", chargeBoxId);
+
+        Optional<ChargePointRegistration> registration = chargePointService.getRegistration(chargeBoxId);
+
+        // Allow connections, if station is in db (registration_status field from db does not matter)
+        boolean allowConnection = registration.isPresent();
+
+        // https://github.com/steve-community/steve/issues/1020
+        if (!allowConnection) {
+            log.error("ChargeBoxId '{}' is not recognized.", chargeBoxId);
+            response.setStatusCode(HttpStatus.NOT_FOUND);
+            return false;
+        }
+
+        // original value in the connection URL provided by the station might have a different uppercase/lowercase
+        // configuration than the one from database. functionally this is not an issue, since the entries in the
+        // database are case-insensitive. but still, let's use the value from DB from here on (and also reference it in
+        // sessions) to prevent confusion.
+        chargeBoxId = registration.get().chargeBoxId();
+
+        // -------------------------------------------------------------------------
+        // 2. Check Ocpp security profiles (if needed)
+        // -------------------------------------------------------------------------
+
+        boolean isSecure = isSecure(request);
+        OcppSecurityProfile profile = registration.get().securityProfile();
+        log.debug("ChargeBoxId '{}' is found in DB with security profile {}", chargeBoxId, profile.getValue());
+
+        // Basic auth for profiles 1 and 2
+        if (profile.isBasicAuth()) {
+            log.debug("ChargeBoxId '{}' is attempting Basic-Auth...", chargeBoxId);
+            ServletServerHttpRequest casted = (ServletServerHttpRequest) request;
+
+            // prevent profile 1 type behavior when profile 2 is configured
+            if (profile == OcppSecurityProfile.Profile_2 && !isSecure) {
+                log.warn("ChargeBoxId '{}' is trying to connect via plain WS, even though it is configured for profile 2. Rejecting.", chargeBoxId);
+                response.setStatusCode(HttpStatus.UNAUTHORIZED);
+                return false;
+            }
+
+            UsernamePasswordAuthenticationToken authentication;
+            try {
+                authentication = converter.convert(casted.getServletRequest());
+            } catch (Exception e) {
+                log.error("ChargeBoxId '{}': Failed to extract Authentication from request ({})", chargeBoxId, e.getMessage());
+                response.setStatusCode(HttpStatus.BAD_REQUEST);
+                return false;
+            }
+
+            boolean valid = chargePointService.validateBasicAuth(registration.get(), authentication);
+            if (!valid) {
+                log.debug("ChargeBoxId '{}': Rejecting handshake because Basic-Auth validation failed", chargeBoxId);
+                response.setStatusCode(HttpStatus.UNAUTHORIZED);
+                return false;
+            }
+
+            log.debug("ChargeBoxId '{}': Successful Basic-Auth", chargeBoxId);
+        }
+
+        // Client cert checks for profile 3
+        if (profile.isClientTLS()) {
+            log.debug("ChargeBoxId '{}' is attempting mTLS...", chargeBoxId);
+            var cert = certificateValidator.getCertificate(request, chargeBoxId);
+            boolean valid = certificateValidator.validate(registration.get(), cert);
+            if (!valid) {
+                log.debug("ChargeBoxId '{}': Rejecting handshake because mTLS certificate validation failed", chargeBoxId);
+                response.setStatusCode(HttpStatus.UNAUTHORIZED);
+                return false;
+            }
+            log.debug("ChargeBoxId '{}': Successful mTLS", chargeBoxId);
+        }
+
+        // -------------------------------------------------------------------------
+        // 3. Route according to the selected protocol
+        // -------------------------------------------------------------------------
+
+        List<String> requestedProtocols = new WebSocketHttpHeaders(request.getHeaders()).getSecWebSocketProtocol();
+
+        if (CollectionUtils.isEmpty(requestedProtocols)) {
+            log.error("ChargeBoxId '{}': No protocol (OCPP version) is specified.", chargeBoxId);
+            response.setStatusCode(HttpStatus.BAD_REQUEST);
+            return false;
+        }
+
+        String version = selectVersion(requestedProtocols);
+
+        if (version == null) {
+            log.error("ChargeBoxId '{}': None of the requested protocols '{}' is supported", chargeBoxId, requestedProtocols);
+            response.setStatusCode(HttpStatus.NOT_FOUND);
+            return false;
+        }
+
+        attributes.put(WebSocketEndpoint.CHARGEBOX_ID_KEY, chargeBoxId);
+
+        log.debug("ChargeBoxId '{}' will be using {}", chargeBoxId, version);
+        return delegate.doHandshake(request, response, wsHandler, attributes);
+    }
+
+    /**
+     * Selects the OCPP version for the first supported protocol in the station's preference order. Since requested
+     * protocols are evaluated before versions (because we iterate over requestedProtocols in the outer loop),
+     * the station's preference order dominates the version collection's order (i.e. the order of versions
+     * does not matter).
+     *
+     * @return the selected OCPP version, or {@code null} if none of the requested protocols is supported
+     */
+    private String selectVersion(List<String> requestedProtocols) {
+        List<String> supportedProtocols = subProtocolCapable.getSubProtocols();
+        for (String requestedProtocol : requestedProtocols) {
+            for (String item : supportedProtocols) {
+                if (item.equals(requestedProtocol)) {
+                    return item;
+                }
+            }
+        }
+        return null;
+    }
+
+    private boolean isSecure(ServerHttpRequest request) {
+        // if behind a TLS-terminating proxy, consider forwarded headers first
+        if (!StringUtils.isEmpty(protocolHeaderFromProxy)) {
+            String forwardedProto = request.getHeaders().getFirst(protocolHeaderFromProxy);
+            if ("https".equalsIgnoreCase(forwardedProto) || "wss".equalsIgnoreCase(forwardedProto)) {
+                return true;
+            }
+        }
+
+        var scheme = request.getURI().getScheme();
+        return "https".equalsIgnoreCase(scheme) || "wss".equalsIgnoreCase(scheme);
+    }
+}

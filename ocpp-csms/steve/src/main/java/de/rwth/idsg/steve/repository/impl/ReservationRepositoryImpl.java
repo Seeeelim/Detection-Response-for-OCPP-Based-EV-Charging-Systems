@@ -1,0 +1,323 @@
+/*
+ * SteVe - SteckdosenVerwaltung - https://github.com/steve-community/steve
+ * Copyright (C) 2013-2026 SteVe Community Team
+ * All Rights Reserved.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+package de.rwth.idsg.steve.repository.impl;
+
+import de.rwth.idsg.steve.SteveException;
+import de.rwth.idsg.steve.repository.ReservationRepository;
+import de.rwth.idsg.steve.repository.ReservationStatus;
+import de.rwth.idsg.steve.repository.dto.InsertReservationParams;
+import de.rwth.idsg.steve.repository.dto.InsertTransactionParams;
+import de.rwth.idsg.steve.repository.dto.Reservation;
+import de.rwth.idsg.steve.utils.DateTimeUtils;
+import de.rwth.idsg.steve.web.dto.ReservationQueryForm;
+import jooq.steve.db.enums.EvseTopologySource;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.jetbrains.annotations.NotNull;
+import org.joda.time.DateTime;
+import org.jooq.DSLContext;
+import org.jooq.Record10;
+import org.jooq.RecordMapper;
+import org.jooq.SelectQuery;
+import org.jooq.exception.DataAccessException;
+import org.jooq.impl.DSL;
+import org.springframework.stereotype.Repository;
+
+import java.util.List;
+import java.util.Set;
+
+import static de.rwth.idsg.steve.repository.impl.RepositoryUtils.ocppTagByUserIdQuery;
+import static jooq.steve.db.tables.ChargeBox.CHARGE_BOX;
+import static jooq.steve.db.tables.Evse.EVSE;
+import static jooq.steve.db.tables.OcppTag.OCPP_TAG;
+import static jooq.steve.db.tables.Reservation.RESERVATION;
+
+/**
+ * @author Sevket Goekay <sevketgokay@gmail.com>
+ * @since 14.08.2014
+ */
+@Slf4j
+@Repository
+@RequiredArgsConstructor
+public class ReservationRepositoryImpl implements ReservationRepository {
+
+    private final DSLContext ctx;
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public List<Reservation> getReservations(ReservationQueryForm form) {
+        SelectQuery selectQuery = ctx.selectQuery();
+        selectQuery.addFrom(RESERVATION);
+        selectQuery.addJoin(OCPP_TAG, OCPP_TAG.ID_TAG.eq(RESERVATION.ID_TAG));
+        selectQuery.addJoin(EVSE, EVSE.EVSE_PK.eq(RESERVATION.EVSE_PK));
+        selectQuery.addJoin(CHARGE_BOX, EVSE.CHARGE_BOX_ID.eq(CHARGE_BOX.CHARGE_BOX_ID));
+
+        selectQuery.addSelect(
+                RESERVATION.RESERVATION_PK,
+                RESERVATION.TRANSACTION_PK,
+                OCPP_TAG.OCPP_TAG_PK,
+                CHARGE_BOX.CHARGE_BOX_PK,
+                OCPP_TAG.ID_TAG,
+                CHARGE_BOX.CHARGE_BOX_ID,
+                RESERVATION.START_DATETIME,
+                RESERVATION.EXPIRY_DATETIME,
+                RESERVATION.STATUS,
+                EVSE.EVSE_ID
+        );
+
+        if (form.isReservationIdSet()) {
+            selectQuery.addConditions(RESERVATION.RESERVATION_PK.in(form.getReservationId()));
+        }
+
+        if (form.isTransactionIdSet()) {
+            selectQuery.addConditions(RESERVATION.TRANSACTION_PK.in(form.getTransactionId()));
+        }
+
+        if (form.isChargeBoxIdSet()) {
+            selectQuery.addConditions(CHARGE_BOX.CHARGE_BOX_ID.in(form.getChargeBoxId()));
+        }
+
+        if (form.isOcppIdTagSet()) {
+            selectQuery.addConditions(RESERVATION.ID_TAG.in(form.getOcppIdTag()));
+        }
+
+        if (form.isUserIdSet()) {
+            var query = ocppTagByUserIdQuery(ctx, form.getUserId());
+            selectQuery.addConditions(RESERVATION.ID_TAG.in(query));
+        }
+
+        if (form.isStatusSet()) {
+            selectQuery.addConditions(RESERVATION.STATUS.eq(form.getStatus().name()));
+        }
+
+        selectQuery.addConditions(EVSE.TOPOLOGY_SOURCE.eq(EvseTopologySource.ocpp1));
+
+        processType(selectQuery, form);
+
+        // Default order
+        selectQuery.addOrderBy(RESERVATION.EXPIRY_DATETIME.asc());
+
+        return selectQuery.fetch().map(new ReservationMapper());
+    }
+
+    @Override
+    public List<Integer> getActiveReservationIds(String chargeBoxId) {
+        var evsePkSelect = Ocpp1ConnectorEvseBridge.evsePkSelect(ctx, chargeBoxId);
+
+        return ctx.select(RESERVATION.RESERVATION_PK)
+                  .from(RESERVATION)
+                  .where(RESERVATION.EVSE_PK.in(evsePkSelect))
+                  .and(RESERVATION.EXPIRY_DATETIME.greaterThan(DateTime.now()))
+                  .and(RESERVATION.STATUS.equal(ReservationStatus.ACCEPTED.name()))
+                  .fetch(RESERVATION.RESERVATION_PK);
+    }
+
+    @Override
+    public int insert(InsertReservationParams params) {
+        // Check overlapping
+        //isOverlapping(startTimestamp, expiryTimestamp, chargeBoxId);
+
+        var evsePk = Ocpp1ConnectorEvseBridge.insertIgnoreConnector(ctx, params.getChargeBoxId(), params.getConnectorId(), false);
+
+        int reservationId = ctx.insertInto(RESERVATION)
+                               .set(RESERVATION.EVSE_PK, evsePk)
+                               .set(RESERVATION.ID_TAG, params.getIdTag())
+                               .set(RESERVATION.START_DATETIME, params.getStartTimestamp())
+                               .set(RESERVATION.EXPIRY_DATETIME, params.getExpiryTimestamp())
+                               .set(RESERVATION.STATUS, ReservationStatus.WAITING.name())
+                               .set(RESERVATION.STATUS_TIMESTAMP, DateTime.now())
+                               .returning(RESERVATION.RESERVATION_PK)
+                               .fetchOne()
+                               .getReservationPk();
+
+        log.debug("A new reservation '{}' is inserted.", reservationId);
+        return reservationId;
+    }
+
+    @Override
+    public void delete(int reservationId) {
+        ctx.delete(RESERVATION)
+           .where(RESERVATION.RESERVATION_PK.equal(reservationId))
+           .execute();
+
+        log.debug("The reservation '{}' is deleted.", reservationId);
+    }
+
+    @Override
+    public void accepted(int reservationId) {
+        internalUpdateReservation(reservationId, ReservationStatus.ACCEPTED);
+    }
+
+    @Override
+    public void cancelled(int reservationId) {
+        internalUpdateReservation(reservationId, ReservationStatus.CANCELLED);
+    }
+
+    @Override
+    public void used(int transactionId, @NotNull InsertTransactionParams params) {
+        if (!params.isSetReservationId()) {
+            return;
+        }
+
+        // -------------------------------------------------------------------------
+        // 1. idTagFromTransaction can either be the exact same idTag that reserved or the parent of this idTag
+        // https://github.com/steve-community/steve/issues/2015
+        // TC_053_CSMS: Use a reserved Connector with parentIdTag
+        // -------------------------------------------------------------------------
+
+        var selectChildrenOfParent = DSL.select(OCPP_TAG.ID_TAG)
+            .from(OCPP_TAG)
+            .where(OCPP_TAG.PARENT_ID_TAG.eq(params.getIdTag()));
+
+        var idTagCondition = RESERVATION.ID_TAG.equal(params.getIdTag()).or(RESERVATION.ID_TAG.in(selectChildrenOfParent));
+
+        // -------------------------------------------------------------------------
+        // 2. incoming connectorId is where the transaction started. but reservation can be on a specific connector
+        // or 0 (if the reservation did not specify a connector)
+        // https://github.com/steve-community/steve/issues/2020
+        // TC_049_CSMS: Reservation of a Charge Point
+        // -------------------------------------------------------------------------
+
+        var chargePointWideEvsePk = Ocpp1ConnectorEvseBridge.evsePkSelect2(
+            ctx,
+            params.getChargeBoxId(),
+            Set.of(0, params.getConnectorId())
+        );
+
+        var evseCondition = RESERVATION.EVSE_PK.in(chargePointWideEvsePk);
+
+        // -------------------------------------------------------------------------
+        // Execute
+        // -------------------------------------------------------------------------
+
+        int count = ctx.update(RESERVATION)
+                       .set(RESERVATION.STATUS, ReservationStatus.USED.name())
+                       .set(RESERVATION.STATUS_TIMESTAMP, params.getStartTimestamp())
+                       .set(RESERVATION.TRANSACTION_PK, transactionId)
+                       .where(RESERVATION.RESERVATION_PK.equal(params.getReservationId()))
+                       .and(idTagCondition)
+                       .and(evseCondition)
+                       .and(RESERVATION.STATUS.eq(ReservationStatus.ACCEPTED.name()))
+                       .execute();
+
+        if (count != 1) {
+            log.warn("Could not mark the reservation '{}' as used: Problems occurred due to sent reservation id, " +
+                    "charge box connector, user id tag or the reservation was used already.", params.getReservationId());
+        }
+    }
+
+    @Override
+    public void cancelActiveReservations(String chargeBoxId, @NotNull Integer connectorId) {
+        try {
+            var evsePkSelect = (connectorId == 0)
+                ? Ocpp1ConnectorEvseBridge.evsePkSelect(ctx, chargeBoxId)
+                : Ocpp1ConnectorEvseBridge.evsePkSelect(ctx, chargeBoxId, connectorId);
+
+            int count = ctx.update(RESERVATION)
+                           .set(RESERVATION.STATUS, ReservationStatus.CANCELLED.name())
+                           .set(RESERVATION.STATUS_TIMESTAMP, DateTime.now())
+                           .where(RESERVATION.EVSE_PK.in(evsePkSelect))
+                           .and(RESERVATION.STATUS.equal(ReservationStatus.ACCEPTED.name()))
+                           .and(RESERVATION.EXPIRY_DATETIME.greaterThan(DateTime.now()))
+                           .execute();
+            log.info("Cancelled {} active reservation(s) for chargeBoxId={}, connectorId={}", count, chargeBoxId, connectorId);
+        } catch (Exception e) {
+            log.error("Failed to cancel reservations for chargeBoxId={}, connectorId={}", chargeBoxId, connectorId, e);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Private helpers
+    // -------------------------------------------------------------------------
+
+    private static class ReservationMapper implements
+            RecordMapper<Record10<Integer, Integer, Integer, Integer, String,
+                                  String, DateTime, DateTime, String, Integer>, Reservation> {
+        @Override
+        public Reservation map(Record10<Integer, Integer, Integer, Integer, String,
+                                        String, DateTime, DateTime, String, Integer> r) {
+            return Reservation.builder()
+                              .id(r.value1())
+                              .transactionId(r.value2())
+                              .ocppTagPk(r.value3())
+                              .chargeBoxPk(r.value4())
+                              .ocppIdTag(r.value5())
+                              .chargeBoxId(r.value6())
+                              .startDatetimeDT(r.value7())
+                              .startDatetime(DateTimeUtils.humanize(r.value7()))
+                              .expiryDatetimeDT(r.value8())
+                              .expiryDatetime(DateTimeUtils.humanize(r.value8()))
+                              .status(r.value9())
+                              .connectorId(r.value10())
+                              .build();
+        }
+    }
+
+    private void internalUpdateReservation(int reservationId, ReservationStatus status) {
+        try {
+            ctx.update(RESERVATION)
+               .set(RESERVATION.STATUS, status.name())
+               .set(RESERVATION.STATUS_TIMESTAMP, DateTime.now())
+               .where(RESERVATION.RESERVATION_PK.equal(reservationId))
+               .and(RESERVATION.STATUS.ne(status.name()))
+               .execute();
+        } catch (DataAccessException e) {
+            log.error("Updating of reservationId '{}' to status '{}' FAILED.", reservationId, status, e);
+        }
+    }
+
+    private void processType(SelectQuery selectQuery, ReservationQueryForm form) {
+        switch (form.getPeriodType()) {
+            case ACTIVE:
+                selectQuery.addConditions(RESERVATION.EXPIRY_DATETIME.greaterThan(DateTime.now()));
+                break;
+
+            case FROM_TO:
+                selectQuery.addConditions(
+                        RESERVATION.START_DATETIME.greaterOrEqual(form.getFrom()),
+                        RESERVATION.EXPIRY_DATETIME.lessOrEqual(form.getTo())
+                );
+                break;
+
+            default:
+                throw new SteveException("Unknown enum type");
+        }
+    }
+
+    /**
+     * Throws exception, if there are rows whose date/time ranges overlap with the input
+     */
+//    private void isOverlapping(DateTime start, DateTime stop, String chargeBoxId) {
+//        try {
+//            int count = ctx.selectOne()
+//                           .from(RESERVATION)
+//                           .where(RESERVATION.EXPIRY_DATETIME.greaterOrEqual(start))
+//                             .and(RESERVATION.START_DATETIME.lessOrEqual(stop))
+//                             .and(RESERVATION.CHARGE_BOX_ID.equal(chargeBoxId))
+//                           .execute();
+//
+//            if (count != 1) {
+//                throw new SteveException("The desired reservation overlaps with another reservation");
+//            }
+//
+//        } catch (DataAccessException e) {
+//            log.error("Exception occurred", e);
+//        }
+//    }
+}

@@ -1,0 +1,26 @@
+Scenario ID: NORMAL-001
+Classification: BENIGN
+
+Protocol: OCPP 1.6J
+Station: EVSE001
+CSMS: SteVe
+Connector: 1
+OCPP Tag: NORMAL001
+Transaction ID: 9
+
+Sequence:
+1. Authorize
+2. StartTransaction
+3. MeterValues
+4. MeterValues
+5. MeterValues
+6. StopTransaction
+
+Expected result:
+- Authorization accepted
+- Transaction created
+- MeterValues received
+- Transaction closed normally
+
+Artifact:
+evse001-normal-transaction-01.pcap
