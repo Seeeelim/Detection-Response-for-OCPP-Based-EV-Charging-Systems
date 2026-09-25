@@ -1,0 +1,44 @@
+{
+  "$schemaVersion": 1,
+  "supervisionUrls": [
+    "ws://192.168.100.20:8180/steve/websocket/CentralSystemService"
+  ],
+  "supervisionUrlDistribution": "round-robin",
+  "log": {
+    "file": "logs/combined.log",
+    "errorFile": "logs/error.log",
+    "maxFiles": 7,
+    "statisticsInterval": 0
+  },
+  "worker": {
+    "processType": "workerSet"
+  },
+  "performanceStorage": {
+    "enabled": true,
+    "type": "none"
+  },
+  "uiServer": {
+    "enabled": false,
+    "type": "ws",
+    "accessPolicy": {
+      "requireTlsForNonLoopback": true,
+      "trustedProxies": [],
+      "allowLoopbackProxy": false,
+      "allowedHosts": [],
+      "allowedOrigins": []
+    },
+    "authentication": {
+      "enabled": true,
+      "type": "protocol-basic-auth",
+      "username": "admin",
+      "password": "admin"
+    }
+  },
+  "persistState": true,
+  "stationTemplateUrls": [
+    {
+      "file": "evse001.station-template.json",
+      "numberOfStations": 1
+    }
+  ]
+}
