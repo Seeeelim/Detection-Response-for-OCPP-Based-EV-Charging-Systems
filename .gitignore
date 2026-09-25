@@ -1,0 +1,29 @@
+# Secrets
+.env
+*.key
+*.pem
+*.p12
+*.jks
+
+# Credentials/private configurations
+secrets/
+credentials/
+
+# Runtime logs
+*.log
+
+# Large/raw datasets
+*.pcap
+*.pcapng
+
+# Node
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# OS/editor
+.DS_Store
+.vscode/
