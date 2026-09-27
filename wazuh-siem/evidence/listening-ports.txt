@@ -1,0 +1,6 @@
+LISTEN 0      2048              0.0.0.0:55000      0.0.0.0:*    users:(("python3",pid=56880,fd=46))                    
+LISTEN 0      128               0.0.0.0:1514       0.0.0.0:*    users:(("wazuh-remoted",pid=57008,fd=4))               
+LISTEN 0      128               0.0.0.0:1515       0.0.0.0:*    users:(("wazuh-authd",pid=56923,fd=6))                 
+LISTEN 0      511               0.0.0.0:443        0.0.0.0:*    users:(("node",pid=58224,fd=19))                       
+LISTEN 0      2048                 [::]:55000         [::]:*    users:(("python3",pid=56880,fd=48))                    
+LISTEN 0      4096   [::ffff:127.0.0.1]:9200             *:*    users:(("java",pid=3278,fd=622))                       

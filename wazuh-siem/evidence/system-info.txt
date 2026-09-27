@@ -1,0 +1,14 @@
+ Static hostname: wazuh-siem
+       Icon name: computer-vm
+         Chassis: vm 🖴
+      Machine ID: a9f7660ca71c422b9f959300967250b7
+         Boot ID: 8dc2576f372445afa0745e40150edde2
+  Virtualization: oracle
+Operating System: Ubuntu 24.04.5 LTS
+          Kernel: Linux 6.8.0-142-generic
+    Architecture: x86-64
+ Hardware Vendor: innotek GmbH
+  Hardware Model: VirtualBox
+Firmware Version: VirtualBox
+   Firmware Date: Fri 2006-12-01
+    Firmware Age: 19y 9month 3w 6d

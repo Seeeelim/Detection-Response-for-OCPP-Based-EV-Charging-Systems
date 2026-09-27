@@ -1,0 +1,3 @@
+lo               UNKNOWN        127.0.0.1/8 ::1/128 
+enp0s3           UP             10.0.2.15/24 metric 100 fd17:625c:f037:2:a00:27ff:fe17:5feb/64 fe80::a00:27ff:fe17:5feb/64 
+enp0s8           UP             192.168.100.30/24 fe80::a00:27ff:fe9a:336b/64 
